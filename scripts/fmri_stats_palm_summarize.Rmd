@@ -1,0 +1,434 @@
+---
+title: "fMRI PALM Results: Summary and Visualization"
+output: html_notebook
+---
+
+<!--
+Purpose:      Summarize FSL PALM permutation-test output files into single CSV files
+              per metric, transpose nodal stats for Connectome Workbench visualization,
+              generate scatter plots for Model 9 global metrics (N = 512), and generate
+              loneliness × age interaction plots for Model 9.4 significant nodes (N = 390).
+              All analyses use the absolute-edge variant.
+
+Inputs:
+  - datainfo.csv                    Output of behav_preproc_recode_variables.Rmd;
+                                    contains all demographic and loneliness variables
+  - merge_abs_network_summary_stat_n*.csv   Per-subject network summary stats (absolute)
+  - CortexSubcortex_ColeAnticevic_NetPartition_wSubcorGSR_parcels_LR_LabelKey.txt
+                                    CAB-NP atlas label key
+  - PALM output files in palm_output/{metric}/ under each palm directory
+
+Outputs:
+  Model 9 (N = 512):
+    - palm_output/abs_model9_{metric}_summary.csv
+    - palm_output/transpose_palm_for_wb/transposed_abs_*.txt
+    - palm_output/images/abs_n512_model9_age_soil_modularity_aveshortestpath.tiff
+  Model 9.4 (N = 390):
+    - palm_output/abs_model9_4_{metric}_summary.csv
+  Model 9.4 interaction plots:
+    - palm_output/images/mod9_4_c3_clustercoef1_byAge5g_SexMaritalHouse.tiff
+    - palm_output/images/mod9_4_c3_clustercoef2_byAge5g_SexMaritalHouse.tiff
+
+Dependencies: tidyverse, gridExtra
+
+Usage:        Update paths in USER CONFIGURATION block; then knit or run chunks sequentially.
+-->
+
+
+# Libraries
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(gridExtra)
+```
+
+
+# USER CONFIGURATION
+```{r config}
+# Main behavioral/demographic dataframe
+datainfo_file <- "/path/to/output/datainfo.csv"
+
+# Network summary stat file (absolute-edge variant; output of fmri_network_analysis_absedges.py)
+net_summary_abs_file <- "/path/to/abs/merge_abs_network_summary_stat_n512.csv"
+
+# CAB-NP atlas label key
+# (CortexSubcortex_ColeAnticevic_NetPartition_wSubcorGSR_parcels_LR_LabelKey.txt)
+cab_info_file <- "/path/to/atlas/CortexSubcortex_ColeAnticevic_NetPartition_wSubcorGSR_parcels_LR_LabelKey.txt"
+
+# PALM input/output directories — absolute-edge variant
+# Model 9 (N = 512): same directory used by run_fmri_stats_palm.slurm
+abs_palm_dir  <- "/path/to/HCA_stat/palm_models/abs_model"
+
+# Model 9.4 (N = 390): separate PALM directory for sociodemographic model
+abs_palm94_dir <- "/path/to/HCA_stat/palm_models/abs_model94"
+```
+
+
+# Load data
+```{r load_data}
+datainfo <- read.csv(datainfo_file)
+
+# Network summary stats (global metrics: modularity_CAnet, average_shortest_path_length)
+df_net_abs <- read.csv(net_summary_abs_file, header = TRUE)
+
+# CAB-NP atlas label key (parcel INDEX and LABEL for extracting significant nodes)
+cab_info <- read.table(cab_info_file, header = TRUE)
+```
+
+
+# Define samples
+```{r samples}
+# Model 9 (N = 512): all fMRI QC-passing participants with loneliness data;
+# excludes HCA7083065 (failed QA)
+mod9_data <- datainfo %>%
+  filter(!is.na(soil_ts),
+         TripleOut_FD05_60Fr == 1,
+         RS.fMRI_Count == 4,
+         src_subject_id != "HCA7083065")
+
+# Model 9.4 (N = 390): Model 9 subset with complete sociodemographic variables
+mod94_data <- mod9_data %>%
+  filter(!is.na(sex),
+         !is.na(household.2g),
+         !is.na(marital.2g))
+```
+
+
+# Model 9 (N = 512): PALM results summary
+```{r mod9_palm_summary}
+# Summarize PALM output files across all metrics and contrasts into a single CSV per metric.
+# Also transpose nodal stat files for Connectome Workbench (wb_command) visualization.
+#
+# PALM output structure (created by run_fmri_stats_palm.slurm):
+#   {palm_dir}/palm_output/{metric}/palm_abs_{metric}_*_c{n}_tstat.csv
+# Transpose output (must be created beforehand):
+#   {palm_dir}/palm_output/transpose_palm_for_wb/
+
+# Graph metrics to summarize (strength excluded; averaged separately)
+graph_list <- c("average_shortest_path", "betweencent", "closecent", "clustercoef",
+                "eigencent", "modularity", "normstrength", "partcoef", "pgcent")
+
+# Model 9 T-contrast labels: c1 = loneliness, c2 = age, c3 = loneliness×age, c4 = F-test
+con_list <- c("c1", "c2", "c3", "c4")
+
+palm_output_dir <- file.path(abs_palm_dir, "palm_output")
+
+for (gg in seq_along(graph_list)) {
+  metric     <- graph_list[gg]
+  nodal_dir  <- file.path(palm_output_dir, metric)
+  list_files <- list.files(nodal_dir, recursive = TRUE)
+
+  df_list <- vector("list", length(con_list))
+
+  for (tt in seq_along(con_list)) {
+    con_name    <- con_list[tt]
+    con_present <- grepl(con_name, list_files)
+    con_files   <- list_files[which(con_present)]
+
+    for (ff in seq_along(con_files)) {
+      read_temp <- read.csv(file.path(nodal_dir, con_files[ff]), header = FALSE)
+
+      if (ff == 1) {
+        df_list[[tt]] <- t(read_temp)
+      } else {
+        df_list[[tt]] <- cbind(df_list[[tt]], t(read_temp))
+      }
+
+      # Transpose and write individual stat file for Workbench visualization
+      temp_df <- t(read_temp)
+      write.table(
+        temp_df,
+        file      = file.path(palm_output_dir, "transpose_palm_for_wb",
+                              paste0("transposed_abs_",
+                                     sub(".csv", "", con_files[ff]), ".txt")),
+        row.names = FALSE,
+        col.names = FALSE
+      )
+    }
+
+    colnames(df_list[[tt]]) <- c(
+      paste0(con_name, "_z"),
+      paste0(con_name, "_cfwep"),
+      paste0(con_name, "_fwep")
+    )
+
+    if (tt == 1) {
+      df_combine <- df_list[[tt]]
+    } else {
+      df_combine <- cbind(df_combine, df_list[[tt]])
+    }
+  }
+
+  write.csv(
+    df_combine,
+    file      = file.path(palm_output_dir, paste0("abs_model9_", metric, "_summary.csv")),
+    row.names = FALSE
+  )
+}
+```
+
+
+# Model 9 (N = 512): Scatter plots — modularity and average shortest path
+```{r mod9_scatter_plots}
+# Four-panel figure:
+#   (a) Age vs. modularity       (b) Loneliness vs. modularity
+#   (c) Age vs. avg path length  (d) Loneliness vs. avg path length
+
+# Merge subject behavioral data with global network summary stats
+mod9_plot <- merge(
+  mod9_data[, c("src_subject_id", "age_yrs", "soil_ts")],
+  df_net_abs,
+  by    = "src_subject_id",
+  all.x = TRUE
+)
+
+# Modularity vs. Age
+p_mod_age <- mod9_plot %>%
+  ggplot(aes(x = age_yrs, y = modularity_CAnet)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(y = "CAB-NP Modularity") +
+  theme(axis.title.x = element_blank()) +
+  ggtitle("(a)")
+
+# Modularity vs. Loneliness
+p_mod_soil <- mod9_plot %>%
+  ggplot(aes(x = soil_ts, y = modularity_CAnet)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(y = "CAB-NP Modularity") +
+  theme(axis.title.x = element_blank()) +
+  ggtitle("(b)")
+
+# Average shortest path vs. Age
+p_path_age <- mod9_plot %>%
+  ggplot(aes(x = age_yrs, y = average_shortest_path_length)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(x = "Age (Yrs)", y = "Average Shortest Path Length") +
+  ggtitle("(c)")
+
+# Average shortest path vs. Loneliness
+p_path_soil <- mod9_plot %>%
+  ggplot(aes(x = soil_ts, y = average_shortest_path_length)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(x = "Loneliness Score", y = "Average Shortest Path Length") +
+  ggtitle("(d)")
+
+g_combined <- arrangeGrob(p_mod_age, p_mod_soil, p_path_age, p_path_soil,
+                          nrow = 2, ncol = 2)
+ggsave(
+  file = file.path(abs_palm_dir, "palm_output", "images",
+                   "abs_n512_model9_age_soil_modularity_aveshortestpath.tiff"),
+  g_combined,
+  dpi  = 300
+)
+```
+
+
+# Model 9.4 (N = 390): PALM results summary
+```{r mod94_palm_summary}
+# Summarize PALM output for the sociodemographic model (Model 9.4, N = 390).
+# 7 contrasts: c1 = loneliness, c2 = age, c3 = loneliness×age, c4 = sex,
+#              c5 = household, c6 = marital, c7 = F-test
+# No Workbench transpose (nodal visualization not performed for Model 9.4).
+
+con_list_94 <- c("c1", "c2", "c3", "c4", "c5", "c6", "c7")
+
+palm_output_dir <- file.path(abs_palm94_dir, "palm_output")
+
+for (gg in seq_along(graph_list)) {
+  metric     <- graph_list[gg]
+  nodal_dir  <- file.path(palm_output_dir, metric)
+  list_files <- list.files(nodal_dir, recursive = TRUE)
+
+  df_list <- vector("list", length(con_list_94))
+
+  for (tt in seq_along(con_list_94)) {
+    con_name    <- con_list_94[tt]
+    con_present <- grepl(con_name, list_files)
+    con_files   <- list_files[which(con_present)]
+
+    for (ff in seq_along(con_files)) {
+      read_temp <- read.csv(file.path(nodal_dir, con_files[ff]), header = FALSE)
+
+      if (ff == 1) {
+        df_list[[tt]] <- t(read_temp)
+      } else {
+        df_list[[tt]] <- cbind(df_list[[tt]], t(read_temp))
+      }
+    }
+
+    colnames(df_list[[tt]]) <- c(
+      paste0(con_name, "_z"),
+      paste0(con_name, "_cfwep"),
+      paste0(con_name, "_fwep")
+    )
+
+    if (tt == 1) {
+      df_combine <- df_list[[tt]]
+    } else {
+      df_combine <- cbind(df_combine, df_list[[tt]])
+    }
+  }
+
+  write.csv(
+    df_combine,
+    file      = file.path(palm_output_dir, paste0("abs_model9_4_", metric, "_summary.csv")),
+    row.names = FALSE
+  )
+}
+```
+
+
+# Model 9.4 (N = 390): Interaction plots — age 5-group
+```{r mod94_age5g_setup}
+# Prepare mod94_data for interaction plots:
+# - Ensure age.bins.3 (5-group age variable) is a correctly ordered factor
+# - Set factor labels for sex, marital status, and household status
+
+mod94_result <- mod94_data %>%
+  mutate(age.bins.3 = as.factor(age.bins.3),
+         age.bins.3 = relevel(age.bins.3, "[36,45]"),
+         sex        = factor(sex, labels = c("Female", "Male")))
+
+levels(mod94_result$marital.2g)   # verify: Married, Not Married
+levels(mod94_result$household.2g) # verify: 2+person, 1-person
+
+# Load absolute-edge nodal clustering coefficient data for Model 9.4 (N = 390)
+# (written by fmri_preproc_compile_nodal_palm.Rmd to abs_palm94_dir)
+cluster_df <- read.csv(file.path(abs_palm94_dir, "abs_nodal_clustercoef_n390.csv"),
+                       header = FALSE)
+```
+
+## Node 1: Default-06_L-Caudate (c3: loneliness × age)
+```{r mod94_plots_node1_5g}
+# Extract clustering coefficient for Default-06_L-Caudate
+sig_cluster1_ind <- cab_info %>%
+  filter(LABEL == "Default-06_L-Caudate") %>%
+  select(INDEX, LABEL)
+
+sig_cluster1              <- cluster_df %>% select(sig_cluster1_ind$INDEX)
+colnames(sig_cluster1)    <- "mod9_4_cluster1_c3_DMN"
+mod94_result              <- cbind(mod94_result, sig_cluster1)
+
+# (a) Overall: loneliness × age 5g
+mod94plot.cluster1.age <- mod94_result %>%
+  ggplot(aes(x = soil_ts, y = mod9_4_cluster1_c3_DMN, color = age.bins.3)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(x = "Loneliness Score", y = "Clustering Coefficient", color = "Age Group") +
+  theme(axis.title.x = element_blank()) +
+  ggtitle("(a)")
+
+# (b) By sex
+mod94plot.cluster1.bysex <- mod94_result %>%
+  ggplot(aes(x = soil_ts, y = mod9_4_cluster1_c3_DMN, color = age.bins.3)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  facet_grid(~ sex, scales = "free") +
+  labs(x = "Loneliness Score", y = "Clustering Coefficient", color = "Age Group") +
+  theme(legend.position = "none",
+        axis.title.y    = element_blank(),
+        axis.title.x    = element_blank()) +
+  ggtitle("(b)")
+
+# (c) By marital status
+mod94plot.cluster1.bymarital <- mod94_result %>%
+  ggplot(aes(x = soil_ts, y = mod9_4_cluster1_c3_DMN, color = age.bins.3)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  facet_wrap(~ marital.2g, scales = "free") +
+  labs(x = "Loneliness Score", y = "Clustering Coefficient", color = "Age Group") +
+  theme(legend.position = "none") +
+  ggtitle("(c)")
+
+# (d) By household status
+mod94plot.cluster1.byhousehold <- mod94_result %>%
+  ggplot(aes(x = soil_ts, y = mod9_4_cluster1_c3_DMN, color = age.bins.3)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  facet_wrap(~ household.2g, scales = "free") +
+  labs(x = "Loneliness Score", y = "Clustering Coefficient", color = "Age Group") +
+  theme(legend.position = "none",
+        axis.title.y    = element_blank()) +
+  ggtitle("(d)")
+
+mod94.cluster1.g <- arrangeGrob(
+  mod94plot.cluster1.age, mod94plot.cluster1.bysex,
+  mod94plot.cluster1.bymarital, mod94plot.cluster1.byhousehold,
+  nrow = 2
+)
+ggsave(
+  file = file.path(abs_palm94_dir, "palm_output", "images",
+                   "mod9_4_c3_clustercoef1_byAge5g_SexMaritalHouse.tiff"),
+  mod94.cluster1.g,
+  dpi  = 300
+)
+```
+
+## Node 2: Frontoparietal-35_R-Cerebellum (c3: loneliness × age)
+```{r mod94_plots_node2_5g}
+# Extract clustering coefficient for Frontoparietal-35_R-Cerebellum
+sig_cluster2_ind           <- cab_info %>%
+  filter(LABEL == "Frontoparietal-35_R-Cerebellum") %>%
+  select(INDEX, LABEL)
+
+sig_cluster2               <- cluster_df %>% select(sig_cluster2_ind$INDEX)
+colnames(sig_cluster2)     <- "mod9_4_cluster2_c3_FPN"
+mod94_result               <- cbind(mod94_result, sig_cluster2)
+
+# (a) Overall: loneliness × age 5g
+mod94plot.cluster2.age <- mod94_result %>%
+  ggplot(aes(x = soil_ts, y = mod9_4_cluster2_c3_FPN, color = age.bins.3)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(x = "Loneliness Score", y = "Clustering Coefficient", color = "Age Group") +
+  theme(axis.title.x = element_blank()) +
+  ggtitle("(a)")
+
+# (b) By sex
+mod94plot.cluster2.bysex <- mod94_result %>%
+  ggplot(aes(x = soil_ts, y = mod9_4_cluster2_c3_FPN, color = age.bins.3)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  facet_grid(~ sex, scales = "free") +
+  labs(x = "Loneliness Score", y = "Clustering Coefficient", color = "Age Group") +
+  theme(legend.position = "none",
+        axis.title.y    = element_blank(),
+        axis.title.x    = element_blank()) +
+  ggtitle("(b)")
+
+# (c) By marital status
+mod94plot.cluster2.bymarital <- mod94_result %>%
+  ggplot(aes(x = soil_ts, y = mod9_4_cluster2_c3_FPN, color = age.bins.3)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  facet_wrap(~ marital.2g, scales = "free") +
+  labs(x = "Loneliness Score", y = "Clustering Coefficient", color = "Age Group") +
+  theme(legend.position = "none") +
+  ggtitle("(c)")
+
+# (d) By household status
+mod94plot.cluster2.byhousehold <- mod94_result %>%
+  ggplot(aes(x = soil_ts, y = mod9_4_cluster2_c3_FPN, color = age.bins.3)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  facet_wrap(~ household.2g, scales = "free") +
+  labs(x = "Loneliness Score", y = "Clustering Coefficient", color = "Age Group") +
+  theme(legend.position = "none",
+        axis.title.y    = element_blank()) +
+  ggtitle("(d)")
+
+mod94.cluster2.g <- arrangeGrob(
+  mod94plot.cluster2.age, mod94plot.cluster2.bysex,
+  mod94plot.cluster2.bymarital, mod94plot.cluster2.byhousehold,
+  nrow = 2
+)
+ggsave(
+  file = file.path(abs_palm94_dir, "palm_output", "images",
+                   "mod9_4_c3_clustercoef2_byAge5g_SexMaritalHouse.tiff"),
+  mod94.cluster2.g,
+  dpi  = 300
+)
+```

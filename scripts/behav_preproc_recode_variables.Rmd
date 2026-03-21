@@ -1,0 +1,342 @@
+---
+title: "Behavioral Data Preprocessing: Variable Recoding"
+output: html_notebook
+---
+
+<!--
+Purpose:      Load and recode raw HCP-Aging behavioral/demographic variables for use in
+              loneliness brain network analyses.
+
+Inputs:
+  - ndar_subject01.csv           NDA demographics package;
+                                 contains age, sex, race, ethnicity, site, soil_ts
+  - hca_motion_fd_summary.csv    Output of fmri_qc_motion_fd.Rmd; contains RS.fMRI_Count
+                                 and TripleOut_FD05_60Fr
+  - ssaga_cover_demo01.csv       SSAGA sociodemographics;
+                                 household size, marital status, work status, income
+  - moca01.csv                   Montreal Cognitive Assessment
+  - prsi01.csv                   NIH Toolbox Social Isolation survey
+
+Outputs:
+  - datainfo.csv                 Main dataframe: demographics + all recoded variables
+
+Dependencies: tidyverse
+
+Usage:        Update paths in USER CONFIGURATION block; then knit or run chunks sequentially.
+-->
+
+
+# Libraries
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+```
+
+
+# USER CONFIGURATION
+```{r config}
+# Directory containing all raw HCP-A NDA text files
+data_dir   <- "/path/to/hca_behavioral_data"
+output_dir <- "/path/to/output"
+
+# Input files (all use 2-row NDA header: row 1 = column names, row 2 = descriptions)
+demographics_file <- file.path(data_dir, "ndar_subject01.csv")
+# hca_motion_fd_summary.csv is produced by fmri_qc_motion_fd.Rmd
+motion_qc_file    <- file.path(output_dir, "hca_motion_fd_summary.csv")
+ssaga_file        <- file.path(data_dir, "ssaga_cover_demo01.csv")
+moca_file         <- file.path(data_dir, "moca01.csv")
+prsi_file         <- file.path(data_dir, "prsi01.csv")
+
+# Output file
+output_datainfo_file <- file.path(output_dir, "datainfo.csv")
+```
+
+
+# Load demographics and create age variables
+```{r demographics}
+# NDA files use a 2-row header: row 1 = column names, row 2 = descriptions
+# Load column names from row 1, then reload data skipping both header rows
+temp     <- read.csv(demographics_file, header = TRUE)
+headers  <- colnames(temp)
+datainfo <- read.csv(demographics_file, skip = 2, header = FALSE)
+colnames(datainfo) <- headers
+
+# Convert all character columns to factor (columns 8 onward: sex, race, ethnicity, site)
+for (cc in 8:dim(datainfo)[2]) {
+  if (class(datainfo[, cc]) == "character") {
+    datainfo[, cc] <- as.factor(datainfo[, cc])
+  }
+}
+
+# Age in years
+datainfo <- datainfo %>%
+  mutate(age_yrs = interview_age / 12)
+
+# Age bins: 5 groups combined at 75+ (used in model covariates and group plots)
+# Breaks: [36–45), [45–55), [55–65), [65–75), [75+]
+datainfo <- datainfo %>%
+  mutate(age.bins.3 = cut(
+    interview_age / 12,
+    breaks = c(
+      min(interview_age / 12),
+      min(interview_age / 12) + 9,
+      min(interview_age / 12) + 19,
+      min(interview_age / 12) + 29,
+      min(interview_age / 12) + 39,
+      max(interview_age / 12)
+    ),
+    include.lowest = TRUE
+  ))
+```
+
+
+# Load scan completeness and motion QC flags
+```{r scan_qc}
+# hca_motion_fd_summary.csv is produced by fmri_qc_motion_fd.Rmd.
+# Motion exclusion criterion: high-motion frames were defined by FD > 0.5 mm, with the
+# frame before and after also marked as high-motion (triple-frame exclusion). Participants
+# were excluded if any of their four resting-state runs had more than 40% high-motion frames.
+# TripleOut_FD05_60Fr == 1 indicates a participant passed this criterion across all four runs.
+temp       <- read.csv(motion_qc_file, header = TRUE)
+headers    <- colnames(temp)
+compl.data <- read.csv(motion_qc_file, skip = 2, header = FALSE)
+colnames(compl.data) <- headers
+
+# Drop columns already present in datainfo
+drop        <- c("subjectkey", "interview_date", "interview_age", "sex", "visit", "unrelated_subset")
+compl.data2 <- compl.data[, !colnames(compl.data) %in% drop]
+
+datainfo <- merge(datainfo, compl.data2, by = "src_subject_id", all.x = TRUE)
+```
+
+
+# Load SSAGA sociodemographics
+```{r ssaga_load}
+temp       <- read.csv(ssaga_file, header = TRUE)
+headers    <- colnames(temp)
+ssaga.data <- read.csv(ssaga_file, skip = 2, header = FALSE)
+colnames(ssaga.data) <- headers
+```
+
+## Household size
+```{r household}
+# household.2g: 1-person (living alone) vs. 2+person; reference = "2+person" (coded 1)
+# household.3g: 1-person, 2-person, 3+person
+# 0-person and NA coded as NA
+ssaga.data <- ssaga.data %>%
+  mutate(
+    household.3g = ifelse(
+      !is.na(household_number_in_house) & household_number_in_house != 0,
+      case_when(
+        household_number_in_house == 1 ~ 1,
+        household_number_in_house == 2 ~ 2,
+        household_number_in_house >= 3 ~ 3
+      ),
+      NA
+    ),
+    # 2+person coded as 1 (reference); 1-person coded as 2
+    household.2g = ifelse(
+      !is.na(household_number_in_house) & household_number_in_house != 0,
+      case_when(
+        household_number_in_house == 1  ~ 2,
+        household_number_in_house >= 2  ~ 1
+      ),
+      NA
+    )
+  ) %>%
+  mutate(
+    household.3g = cut(household.3g, 3, labels = c("1-person", "2-person", "3+person")),
+    household.2g = cut(household.2g, 2, labels = c("2+person", "1-person"))
+  )
+
+# Remove any pre-existing household.2g (may be in ndar_subject01.csv) and merge custom coding
+datainfo <- datainfo %>%
+  select(-any_of("household.2g"))
+
+datainfo <- merge(datainfo, ssaga.data[, c("src_subject_id", "household.2g")],
+                  by = "src_subject_id", all.x = TRUE)
+```
+
+## Marital status
+```{r marital}
+# marital.2g: Married (includes "Living as Married") vs. Not Married; reference = "Married"
+ssaga.data <- ssaga.data %>%
+  mutate(across(das1ms, na_if, "")) %>%
+  mutate(across(das1ms, as.factor))
+
+ssaga.data$marital.2g <- recode_factor(
+  ssaga.data$das1ms,
+  "DIVORCED"          = "Not Married",
+  "LIVING AS MARRIED" = "Married",
+  "MARRIED"           = "Married",
+  "NEVER MARRIED"     = "Not Married",
+  "SEPARATED"         = "Not Married",
+  "WIDOWED"           = "Not Married"
+)
+
+datainfo <- merge(datainfo, ssaga.data[, c("src_subject_id", "das1ms", "marital.2g")],
+                  by = "src_subject_id", all.x = TRUE)
+
+# Re-code with Married as reference (coded as 1)
+datainfo <- datainfo %>%
+  mutate(marital.2g = ifelse(
+    !is.na(marital.2g),
+    case_when(
+      marital.2g == "Married"     ~ 1,
+      marital.2g == "Not Married" ~ 2
+    ),
+    NA
+  )) %>%
+  mutate(marital.2g = cut(marital.2g, 2, labels = c("Married", "Not Married")))
+```
+
+## Work status
+```{r work}
+# work.2g: Employed vs. Unemployed
+# Based on eo4 (currently employed) and a2b_yn (working full-time)
+# Note: 1 subject reported Unemployed (eo4 = 0) but also full-time (a2b_yn = 1) → coded as NA
+ssaga.data <- ssaga.data %>%
+  mutate(across(a2b_yn, as.factor)) %>%
+  mutate(across(eo4,    as.factor))
+
+ssaga.data <- ssaga.data %>%
+  mutate(work.3g = ifelse(
+    !is.na(eo4),
+    ifelse(!is.na(a2b_yn),
+           case_when(
+             eo4 == "1" & a2b_yn == "1" ~ 1,
+             eo4 == "1" & a2b_yn == "0" ~ 2
+           ),
+           case_when(eo4 == "0" ~ 3)),
+    NA
+  )) %>%
+  mutate(work.3g = cut(work.3g, 3,
+                       labels = c("Employed-Fulltime", "Employed-NotFulltime", "Unemployed")))
+
+ssaga.data <- ssaga.data %>%
+  mutate(work.2g = ifelse(
+    !is.na(eo4),
+    ifelse(eo4 == "0",
+           ifelse(is.na(a2b_yn),
+                  case_when(TRUE ~ 2),
+                  NA),
+           case_when(eo4 == "1" ~ 1)),
+    NA
+  )) %>%
+  mutate(work.2g = cut(work.2g, 2, labels = c("Employed", "Unemployed")))
+
+datainfo <- merge(datainfo, ssaga.data[, c("src_subject_id", "eo4", "a2b_yn", "work.3g", "work.2g")],
+                  by = "src_subject_id", all.x = TRUE)
+```
+
+## Annual family income (log-transformed)
+```{r income}
+# Log-transform annual family income (natural log)
+# 0 and NA → NA (3 subjects reported $0 income)
+ssaga.data <- ssaga.data %>%
+  mutate(annual_fam_inc.log = ifelse(
+    !is.na(annual_fam_inc),
+    ifelse(annual_fam_inc != 0, log(annual_fam_inc), NA),
+    NA
+  ))
+
+# Remove pre-existing income columns (may be in ndar_subject01.csv) and merge updated values
+datainfo <- datainfo %>%
+  select(-any_of(c("annual_fam_inc", "annual_fam_inc.log")))
+
+datainfo <- merge(datainfo, ssaga.data[, c("src_subject_id", "annual_fam_inc", "annual_fam_inc.log")],
+                  by = "src_subject_id", all.x = TRUE)
+```
+
+
+# Load MoCA: cognitive assessment and education groups
+```{r moca_load}
+temp      <- read.csv(moca_file, header = TRUE)
+headers   <- colnames(temp)
+moca.data <- read.csv(moca_file, skip = 2, header = FALSE)
+colnames(moca.data) <- headers
+
+# Merge MoCA total score into datainfo
+datainfo <- merge(datainfo, moca.data[c("src_subject_id", "moca_total")],
+                  by = "src_subject_id", all.x = TRUE)
+```
+
+```{r education}
+# Education groups from MoCA years-of-education variable (moca_edu = actual years)
+# Groups: <= 14 yrs → "High School or Below"; 15–18 → "College"; >= 19 → "Graduate"
+hca.education <- moca.data %>%
+  select(src_subject_id, moca_edu) %>%
+  mutate(moca_edu.f = as.factor(moca_edu)) %>%
+  mutate(moca_edu.3g = ifelse(
+    !is.na(moca_edu.f),
+    case_when(
+      moca_edu.f %in% c("7", "8", "9", "10", "11", "12", "13", "14") ~ 1,
+      moca_edu.f %in% c("15", "16", "17", "18")                       ~ 2,
+      TRUE                                                              ~ 3
+    ),
+    NA
+  )) %>%
+  mutate(moca_edu.3g = cut(moca_edu.3g, 3,
+                           labels = c("High School or Below", "College", "Graduate")))
+
+# Cross-reference: education from SSAGA bkgrnd_education (self-reported categorical)
+hca.education <- merge(hca.education, ssaga.data[, c("src_subject_id", "bkgrnd_education")],
+                       by = "src_subject_id", all.x = TRUE)
+hca.education <- hca.education %>%
+  mutate(bkgrnd_education = ifelse(bkgrnd_education == "", NA, bkgrnd_education)) %>%
+  mutate(bkgrnd_education.f = as.factor(bkgrnd_education)) %>%
+  mutate(bkgrnd_education.3g = ifelse(
+    !is.na(bkgrnd_education.f),
+    case_when(
+      bkgrnd_education.f %in% c("3RD", "9TH", "10TH", "11TH", "12TH")                  ~ 1,
+      bkgrnd_education.f %in% c("TECHNICAL SCHOOL OR 1 YR COLLEGE", "2 YRS COLLEGE",
+                                  "3 YRS COLLEGE", "4 YRS COLLEGE: B.A., B.S.")          ~ 2,
+      TRUE                                                                                ~ 3
+    ),
+    NA
+  )) %>%
+  mutate(bkgrnd_education.3g = cut(bkgrnd_education.3g, 3,
+                                   labels = c("High School or Below", "College", "Graduate")))
+
+datainfo <- merge(datainfo, hca.education[, c("src_subject_id", "moca_edu.3g", "bkgrnd_education.3g")],
+                  by = "src_subject_id", all.x = TRUE)
+```
+
+
+# Load PRSI: NIH Toolbox Social Isolation survey (soil_ts)
+```{r prsi_load}
+temp       <- read.csv(prsi_file, header = TRUE)
+headers    <- colnames(temp)
+prsi.data  <- read.csv(prsi_file, skip = 2, header = FALSE)
+colnames(prsi.data) <- headers
+
+# Drop metadata columns; retain src_subject_id and survey variables including soil_ts
+drop       <- c("collection_id", "prsi01_id", "dataset_id", "subjectkey",
+                "interview_date", "interview_age", "sex", "collection_title",
+                "interview_language", "version_form")
+prsi.data2 <- prsi.data[, !colnames(prsi.data) %in% drop]
+
+datainfo <- merge(datainfo, prsi.data2, by = "src_subject_id", all.x = TRUE)
+```
+
+
+# Loneliness grouping from SOIL T-score
+```{r loneliness_groups}
+# Loneliness groups based on NIH Toolbox cutoffs: <= 40 = Low; 41–59 = Mid; >= 60 = High
+datainfo <- datainfo %>%
+  mutate(soil.3g = ifelse(
+    !is.na(soil_ts),
+    case_when(
+      soil_ts >= 60 ~ 3,
+      soil_ts >  40 ~ 2,
+      soil_ts <= 40 ~ 1
+    ),
+    NA
+  )) %>%
+  mutate(soil.3g = cut(soil.3g, 3, labels = c("Lowlonely", "Midlonely", "Highlonely")))
+```
+
+
+# Export main dataframe
+```{r export}
+write.csv(datainfo, file = output_datainfo_file, row.names = FALSE)
+```

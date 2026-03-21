@@ -1,0 +1,198 @@
+---
+title: "HCP-Aging QC: Framewise Displacement"
+author: "Samantha Chen"
+date: "Feb 02 2022"
+output: html_notebook
+---
+
+## Overview
+
+This notebook computes and visualizes framewise displacement (FD) for quality
+control of HCP-Aging (HCA) resting-state and task fMRI data.
+
+For each subject and functional run, the notebook:
+
+1. Reads `Movement_Regressors.txt` from the HCP pipeline output
+2. Plots 6 motion parameters (3 translations + 3 rotations)
+3. Calculates FD using the Power et al. (2012) formula
+4. Flags frames exceeding FD thresholds (0.3 mm and 0.5 mm)
+5. Saves per-run FD timeseries and combined motion + FD plots as PDF
+
+A group-level FD summary CSV is saved at the end.
+
+**Inputs:**
+
+- HCA fMRI results directory (`hca_mmp`): contains `Movement_Regressors.txt` per run
+- Subject list CSV: with column `src_subject_id` (format: `HCA<numeric_id>`)
+
+**Outputs:**
+
+- Per-run FD timeseries: `<output_motion>/HCA<subj>/HCA<subj>_<run>_framewise.csv`
+- Per-run motion + FD plot: `<output_motion>/HCA<subj>/HCA<subj>_<run>_motion.pdf`
+- Group FD summary: `<output_motion>/Framewise_summary.csv`
+
+
+```{r setup, message=FALSE}
+library(tidyverse)  # dplyr, ggplot2
+library(reshape)    # melt() for wide-to-long conversion
+library(gridExtra)  # combine multiple ggplot panels
+```
+
+
+```{r configuration}
+# ── USER CONFIGURATION ─────────────────────────────────────────────────────────
+# Update these paths before running.
+
+# Root directory of HCA fmriresults01 data
+hca_mmp <- "/path/to/HCA_data/fmriresults01"
+
+# Output directory for motion QC files and plots
+output_motion <- "/path/to/output/motion_qc"
+
+# Subject list CSV (must contain column: src_subject_id, format HCA<numeric_id>)
+subj_list_file <- "/path/to/HCA_subject_list.csv"
+
+# HCA functional run names (as named in the HCP directory structure)
+hca_func_list <- list(
+  "rfMRI_REST1_AP", "rfMRI_REST1_PA",
+  "rfMRI_REST2_AP", "rfMRI_REST2_PA",
+  "tfMRI_CARIT_PA", "tfMRI_FACENAME_PA", "tfMRI_VISMOTOR_PA"
+)
+
+# Column names for the 12-column Movement_Regressors.txt (6 params + 6 derivatives)
+# HCP pipeline format: X Y Z RotX RotY RotZ dX dY dZ dRotX dRotY dRotZ
+motion_colnames <- c("X", "Y", "Z", "RotX", "RotY", "RotZ",
+                     "dX", "dY", "dZ", "dRotX", "dRotY", "dRotZ")
+
+# FD outlier thresholds (mm)
+fd_thr_low  <- 0.3
+fd_thr_high <- 0.5
+# ───────────────────────────────────────────────────────────────────────────────
+```
+
+
+```{r load_subjects}
+# Read subject list and extract the numeric part of each subject ID
+# src_subject_id format: "HCA<numeric_id>"
+subj_info <- read.csv(subj_list_file, header = TRUE)
+subjects <- substr(subj_info$src_subject_id, 4, nchar(subj_info$src_subject_id))
+```
+
+
+```{r compute_fd}
+# Initialize group-level FD summary data frame
+FD_dat <- data.frame()
+
+for (ss in 1:length(subjects)) {
+
+  # Create subject output directory if it does not exist
+  subj_output <- file.path(output_motion, paste0("HCA", subjects[ss]))
+  if (!file.exists(subj_output)) {
+    dir.create(subj_output, recursive = TRUE)
+  }
+
+  # Locate this subject's directory in the HCA data (matched by numeric ID)
+  hca_subject <- grep(list.files(hca_mmp), pattern = subjects[ss], value = TRUE)
+
+  for (tt in 1:length(hca_func_list)) {
+    hca_func     <- hca_func_list[[tt]]
+    hca_func_dir <- file.path(hca_mmp, hca_subject, "MNINonLinear", "Results", hca_func)
+
+    # Some subjects did not complete all scans; skip missing runs
+    if (!file.exists(hca_func_dir)) next
+
+    # ── Read motion regressors ────────────────────────────────────────────────
+    # HCP output: Movement_Regressors.txt, dim [n_frames x 12], no header
+    motion_hca_temp <- read.table(
+      file.path(hca_func_dir, "Movement_Regressors.txt"),
+      header = FALSE, sep = ""
+    )
+    colnames(motion_hca_temp) <- motion_colnames
+
+    # ── Plot 6 motion parameters ──────────────────────────────────────────────
+    # Reshape to long format for ggplot
+    temp_hca_df <- data.frame(x = seq_along(motion_hca_temp[, 1]),
+                              motion_hca_temp[, 1:6])
+    temp_hca_df_long <- melt(temp_hca_df, id.vars = "x")
+
+    hca_motion_reg <- ggplot(temp_hca_df_long, aes(x = x, y = value, color = variable)) +
+      geom_line() +
+      ggtitle(paste("HCA sub", subjects[ss], hca_func)) +
+      labs(x = "Frame #", y = "Trans. (mm) & Rot. (degrees)") +
+      coord_cartesian(ylim = c(-2, 2)) +
+      theme(legend.title    = element_blank(),
+            legend.position = "top",
+            legend.box      = "horizontal") +
+      guides(color = guide_legend(nrow = 1))
+
+    # ── Calculate framewise displacement (Power et al., 2012) ─────────────────
+    # FD = sum of absolute frame-to-frame displacements across 6 motion parameters.
+    # Rotations (degrees) are converted to mm assuming a 50 mm sphere radius.
+    temp_hca_fd <- motion_hca_temp
+
+    hca_trans  <- cbind(c(0, diff(temp_hca_fd[, 1])),
+                        c(0, diff(temp_hca_fd[, 2])),
+                        c(0, diff(temp_hca_fd[, 3])))
+    hca_rot    <- cbind(c(0, diff(temp_hca_fd[, 4])),
+                        c(0, diff(temp_hca_fd[, 5])),
+                        c(0, diff(temp_hca_fd[, 6])))
+    hca_rot_mm <- (pi / 180) * hca_rot * 50
+
+    temp_hca_fd$FD <- apply(abs(cbind(hca_trans, hca_rot_mm)), 1, sum)
+
+    # Build per-run FD data frame (Frame index + FD value)
+    hca_fd <- data.frame(Frame = seq_along(temp_hca_fd[, 1]),
+                         FD    = temp_hca_fd$FD)
+
+    # Flag outlier frames at each threshold (1 = outlier, 0 = clean)
+    hca_fd$FD_outlier_thr03 <- as.integer(hca_fd$FD >= fd_thr_low)
+    hca_fd$FD_outlier_thr05 <- as.integer(hca_fd$FD >= fd_thr_high)
+
+    # Save per-run FD timeseries
+    write.csv(
+      hca_fd,
+      file      = file.path(subj_output,
+                             paste0("HCA", subjects[ss], "_", hca_func, "_framewise.csv")),
+      row.names = FALSE
+    )
+
+    # Append per-run summary statistics to group data frame
+    temp_fd_dat <- data.frame(
+      Subject            = subjects[ss],
+      Task               = hca_func,
+      FD_average         = mean(hca_fd$FD),
+      FD_max             = max(hca_fd$FD),
+      FD_SD              = sd(hca_fd$FD),
+      FD_noutlier_thr03  = sum(hca_fd$FD_outlier_thr03),
+      FD_noutlier_thr05  = sum(hca_fd$FD_outlier_thr05)
+    )
+    FD_dat <- rbind(FD_dat, temp_fd_dat)
+
+    # ── Plot FD timeseries ────────────────────────────────────────────────────
+    hca_fd_plot <- ggplot(data = hca_fd, aes(x = Frame, y = FD)) +
+      geom_line() +
+      ggtitle(paste("HCA sub", subjects[ss], hca_func)) +
+      labs(y = "FD (mm)", x = "Frame #") +
+      coord_cartesian(ylim = c(0, 2)) +
+      geom_hline(yintercept = c(fd_thr_low, fd_thr_high),
+                 color      = c("#00BFC4", "#F8766D"),
+                 linetype   = "dashed",
+                 linewidth  = 1) +   # cyan = 0.3 mm; red = 0.5 mm
+      theme(legend.title    = element_blank(),
+            legend.position = "top",
+            legend.box      = "horizontal") +
+      guides(color = guide_legend(nrow = 1))
+
+    # Save combined motion parameters + FD plot as PDF
+    pdf(file.path(subj_output,
+                  paste0("HCA", subjects[ss], "_", hca_func, "_motion.pdf")))
+    grid.arrange(hca_motion_reg, hca_fd_plot, ncol = 1)
+    dev.off()
+  }
+}
+
+# Save group-level FD summary
+write.csv(FD_dat,
+          file      = file.path(output_motion, "Framewise_summary.csv"),
+          row.names = FALSE)
+```

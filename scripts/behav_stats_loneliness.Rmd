@@ -1,0 +1,407 @@
+---
+title: "Behavioral Analysis: Loneliness and Sociodemographic Factors"
+output: html_notebook
+---
+
+<!--
+Purpose:      Descriptive statistics and regression models examining loneliness
+              (SOIL T-score) in relation to sociodemographic factors in the
+              final N = 512 sample. Produces manuscript Table 1 & 2 summary stats
+              and the Age–Loneliness scatterplot with marginal histograms.
+
+Inputs:
+  - datainfo.csv           Output of behav_preproc_recode_variables.Rmd;
+                           contains all recoded sociodemographic variables,
+                           loneliness, and motion QC flags
+
+Outputs:
+  - soil_age_scatter_marginal.tiff    Age–Loneliness scatterplot with marginal histograms
+
+Dependencies: tidyverse, broom, gridExtra, car, ggExtra, rstatix
+
+Usage:        Update paths in USER CONFIGURATION block; then knit or run
+              chunks sequentially.
+-->
+
+
+# Libraries
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(broom)
+library(gridExtra)
+library(car)
+library(ggExtra)
+library(rstatix)
+```
+
+
+# USER CONFIGURATION
+```{r config}
+# Output of behav_preproc_recode_variables.Rmd
+datainfo_file <- "/path/to/output/datainfo.csv"
+
+# Directory for saving figures
+fig_dir <- "/path/to/figures"
+
+# Output figure file
+output_scatter_file <- file.path(fig_dir, "soil_age_scatter_marginal.tiff")
+```
+
+
+# Load data and create analysis sample (N = 512)
+```{r load_data}
+datainfo <- read.csv(datainfo_file, header = TRUE)
+
+# Final analysis sample (N = 512):
+#   - has loneliness score (soil_ts)
+#   - passed motion QC (TripleOut_FD05_60Fr == 1)
+#   - completed all four resting-state runs (RS.fMRI_Count == 4)
+#   - one subject excluded per data quality review
+mod9_data <- datainfo %>%
+  filter(!is.na(soil_ts),
+         TripleOut_FD05_60Fr == 1,
+         RS.fMRI_Count == 4,
+         src_subject_id != "HCA7083065")
+
+dim(mod9_data)
+```
+
+
+# Mean-center annual family income
+```{r income_center}
+# Mean-center log-transformed income across the N = 512 sample
+# 0-income subjects were coded as NA in behav_preproc_recode_variables.Rmd
+mod9_data <- mod9_data %>%
+  mutate(annual_fam_inc.log.c = scale(annual_fam_inc.log, center = TRUE, scale = FALSE)) %>%
+  mutate(annual_fam_inc.log.c = as.vector(annual_fam_inc.log.c))
+```
+
+
+# Descriptive statistics
+
+## Loneliness
+```{r desc_loneliness}
+mod9_data %>%
+  summarise(n         = n(),
+            mean      = mean(soil_ts, na.rm = TRUE),
+            sd        = sd(soil_ts, na.rm = TRUE),
+            min       = min(soil_ts, na.rm = TRUE),
+            max       = max(soil_ts, na.rm = TRUE),
+            n_missing = sum(is.na(soil_ts)))
+```
+
+## Age
+```{r desc_age}
+mod9_data %>%
+  summarise(n         = n(),
+            mean      = mean(age_yrs, na.rm = TRUE),
+            sd        = sd(age_yrs, na.rm = TRUE),
+            min       = min(age_yrs, na.rm = TRUE),
+            max       = max(age_yrs, na.rm = TRUE),
+            n_missing = sum(is.na(age_yrs)))
+```
+
+## Sex
+```{r desc_sex}
+str(mod9_data$sex)
+
+mod9_data %>%
+  group_by(sex) %>%
+  summarise(n = n())
+
+# Sex differences in loneliness
+mod9_data %>%
+  group_by(sex) %>%
+  summarise(n         = n(),
+            mean      = mean(soil_ts, na.rm = TRUE),
+            sd        = sd(soil_ts, na.rm = TRUE),
+            min       = min(soil_ts, na.rm = TRUE),
+            max       = max(soil_ts, na.rm = TRUE),
+            n_missing = sum(is.na(soil_ts)))
+
+# Variance test: non-significant → equal variance
+var.test(data = mod9_data, soil_ts ~ sex)
+# t-test (equal variance)
+# Note: t.test uses group 2 as reference; lm() uses group 1 (Female) as reference
+t.test(data = mod9_data, soil_ts ~ sex, var.equal = TRUE)
+summary(lm(data = mod9_data, soil_ts ~ sex))
+confint(lm(data = mod9_data, soil_ts ~ sex))
+```
+
+## Household
+```{r desc_household}
+str(mod9_data$household.2g)
+levels(mod9_data$household.2g)
+
+mod9_data %>%
+  group_by(household.2g) %>%
+  summarise(n = n())
+
+# Household differences in loneliness
+mod9_data %>%
+  group_by(household.2g) %>%
+  summarise(n         = n(),
+            mean      = mean(soil_ts, na.rm = TRUE),
+            sd        = sd(soil_ts, na.rm = TRUE),
+            min       = min(soil_ts, na.rm = TRUE),
+            max       = max(soil_ts, na.rm = TRUE),
+            n_missing = sum(is.na(soil_ts)))
+
+# Variance test: non-significant → equal variance
+var.test(data = mod9_data, soil_ts ~ household.2g)
+t.test(data = mod9_data, soil_ts ~ household.2g, var.equal = TRUE)
+```
+
+## Marital status
+```{r desc_marital}
+str(mod9_data$marital.2g)
+levels(mod9_data$marital.2g)
+# Relabel for display
+levels(mod9_data$marital.2g) <- c("Married", "Unmarried")
+
+# Marital differences in loneliness
+mod9_data %>%
+  group_by(marital.2g) %>%
+  summarise(n         = n(),
+            mean      = mean(soil_ts, na.rm = TRUE),
+            sd        = sd(soil_ts, na.rm = TRUE),
+            min       = min(soil_ts, na.rm = TRUE),
+            max       = max(soil_ts, na.rm = TRUE),
+            n_missing = sum(is.na(soil_ts)))
+
+# Variance test: significant → unequal variance; use Welch's t-test
+var.test(data = mod9_data, soil_ts ~ marital.2g)
+```
+
+## Work status
+```{r desc_work}
+str(mod9_data$work.2g)
+
+# Work differences in loneliness
+mod9_data %>%
+  group_by(work.2g) %>%
+  summarise(n         = n(),
+            mean      = mean(soil_ts, na.rm = TRUE),
+            sd        = sd(soil_ts, na.rm = TRUE),
+            min       = min(soil_ts, na.rm = TRUE),
+            max       = max(soil_ts, na.rm = TRUE),
+            n_missing = sum(is.na(soil_ts)))
+
+# Variance test: non-significant → equal variance
+var.test(data = mod9_data, soil_ts ~ work.2g)
+```
+
+## Education
+```{r desc_education}
+str(mod9_data$moca_edu.3g)
+levels(mod9_data$moca_edu.3g)
+
+# Education differences in loneliness
+mod9_data %>%
+  group_by(moca_edu.3g) %>%
+  summarise(n         = n(),
+            mean      = mean(soil_ts, na.rm = TRUE),
+            sd        = sd(soil_ts, na.rm = TRUE),
+            min       = min(soil_ts, na.rm = TRUE),
+            max       = max(soil_ts, na.rm = TRUE),
+            n_missing = sum(is.na(soil_ts)))
+
+# Bartlett test for multiple groups: significant → unequal variance
+bartlett.test(data = mod9_data, soil_ts ~ moca_edu.3g)
+```
+
+## Annual family income
+```{r desc_income}
+summary(mod9_data$annual_fam_inc)
+summary(mod9_data$annual_fam_inc.log)
+sum(!is.na(mod9_data$annual_fam_inc.log))
+
+# Exclude 0-income subjects (treated as NA) for summary stats
+mod9_data %>%
+  filter(annual_fam_inc != 0) %>%
+  summarise(mean = mean(annual_fam_inc), sd = sd(annual_fam_inc))
+```
+
+
+# Regression models
+```{r models}
+# Pearson r: age–loneliness
+mod9_data %>%
+  summarise(r       = cor.test(soil_ts, age_yrs)[["estimate"]],
+            p.value = cor.test(soil_ts, age_yrs)[["p.value"]])
+
+mod9.models <- mod9_data %>%
+  nest() %>%
+  mutate(
+    # Model 0: Age
+    model0     = map(data, ~ lm(soil_ts ~ age_yrs, data = .)),
+    # Pearson r (standardized)
+    model0.1   = map(data, ~ lm(scale(soil_ts) ~ scale(age_yrs), data = .)),
+    # Model 1: Sex (equal variance)
+    # lm() takes Group 1 (Female) as reference
+    model1     = map(data, ~ lm(soil_ts ~ sex, data = .)),
+    model1.1   = map(data, ~ Anova(lm(soil_ts ~ sex, data = .), type = "III")),
+    # Sex × Age
+    model1.2   = map(data, ~ lm(soil_ts ~ age_yrs * sex, data = .)),
+    # Model 2: Household (equal variance)
+    model2     = map(data, ~ lm(soil_ts ~ household.2g, data = .)),
+    model2.1   = map(data, ~ Anova(lm(soil_ts ~ household.2g, data = .), type = "III")),
+    # Household × Age
+    model2.2   = map(data, ~ lm(soil_ts ~ age_yrs * household.2g, data = .)),
+    # Household × Sex
+    model2.3   = map(data, ~ lm(soil_ts ~ sex * household.2g, data = .)),
+    model2.3.1 = map(data, ~ Anova(lm(soil_ts ~ sex * household.2g, data = .), type = "III")),
+    # Model 3: Marital (unequal variance — use oneway.test / Welch's ANOVA)
+    # Note: t.test CIs have opposite reference group to lm()
+    model3     = map(data, ~ lm(soil_ts ~ marital.2g, data = .)),
+    model3.1   = map(data, ~ oneway.test(soil_ts ~ marital.2g, data = .)),
+    # Marital × Age
+    model3.2   = map(data, ~ lm(soil_ts ~ age_yrs * marital.2g, data = .)),
+    # Marital × Sex
+    model3.3   = map(data, ~ lm(soil_ts ~ sex * marital.2g, data = .)),
+    model3.3.1 = map(data, ~ Anova(lm(soil_ts ~ sex * marital.2g, data = .), type = "III")),
+    # Model 4: Full sociodemographic model
+    model4     = map(data, ~ lm(soil_ts ~ age_yrs + sex + household.2g + marital.2g +
+                                           work.2g + annual_fam_inc.log.c + moca_edu.3g, data = .)),
+    # Mean-centered age
+    model4.1   = map(data, ~ lm(soil_ts ~ scale(age_yrs, center = TRUE, scale = FALSE) +
+                                           sex + household.2g + marital.2g +
+                                           work.2g + annual_fam_inc.log.c + moca_edu.3g, data = .)),
+    # Standardized age and income — manuscript Table 2
+    model4.2   = map(data, ~ lm(scale(soil_ts) ~ scale(age_yrs, center = TRUE, scale = TRUE) +
+                                                   sex + household.2g + marital.2g +
+                                                   work.2g + scale(annual_fam_inc.log, center = TRUE, scale = TRUE) +
+                                                   moca_edu.3g, data = .)),
+    # Model 5: Three-way Age × Sex × Marital
+    model5     = map(data, ~ lm(soil_ts ~ age_yrs * marital.2g * sex, data = .)),
+    model5.1   = map(data, ~ Anova(lm(soil_ts ~ age_yrs * marital.2g * sex, data = .), type = "III")),
+    # Three-way + remaining covariates
+    model5.2   = map(data, ~ Anova(lm(soil_ts ~ age_yrs * marital.2g * sex +
+                                                 household.2g + work.2g + annual_fam_inc.log.c + moca_edu.3g, data = .),
+                                   type = "III")),
+    # Model 6: Work (equal variance)
+    model6     = map(data, ~ lm(soil_ts ~ work.2g, data = .)),
+    model6.1   = map(data, ~ Anova(lm(soil_ts ~ work.2g, data = .), type = "III")),
+    # Work × Age
+    model6.2   = map(data, ~ lm(soil_ts ~ age_yrs * work.2g, data = .)),
+    # Work × Sex
+    model6.3   = map(data, ~ lm(soil_ts ~ sex * work.2g, data = .)),
+    model6.3.1 = map(data, ~ Anova(lm(soil_ts ~ sex * work.2g, data = .), type = "III")),
+    # Model 7: Income
+    model7     = map(data, ~ lm(soil_ts ~ annual_fam_inc.log.c, data = .)),
+    # Standardized coefficient (= Pearson r)
+    model7.0   = map(data, ~ lm(scale(soil_ts) ~ scale(annual_fam_inc.log), data = .)),
+    # Income × Age
+    model7.1   = map(data, ~ lm(soil_ts ~ age_yrs * annual_fam_inc.log.c, data = .)),
+    # Income × Sex
+    model7.2   = map(data, ~ lm(soil_ts ~ sex * annual_fam_inc.log.c, data = .)),
+    # Model 8: Education (unequal variance — use oneway.test / white.adjust)
+    model8     = map(data, ~ lm(soil_ts ~ moca_edu.3g, data = .)),
+    model8.1   = map(data, ~ Anova(lm(soil_ts ~ moca_edu.3g, data = .), type = "III",
+                                   white.adjust = TRUE)),
+    model8.1.1 = map(data, ~ oneway.test(soil_ts ~ moca_edu.3g, data = .)),
+    # Education × Age
+    model8.2   = map(data, ~ lm(soil_ts ~ age_yrs * moca_edu.3g, data = .)),
+    # Education × Sex
+    model8.3   = map(data, ~ lm(soil_ts ~ sex * moca_edu.3g, data = .)),
+    model8.3.1 = map(data, ~ Anova(lm(soil_ts ~ sex * moca_edu.3g, data = .), type = "III")),
+    # broom::tidy — regression coefficients with 95% CIs
+    tidied0     = map(model0,     tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied0.1   = map(model0.1,   tidy, conf.int = TRUE, conf.level = 0.95),
+    glance0     = map(model0,     glance),
+    tidied1     = map(model1,     tidy, conf.int = TRUE, conf.level = 0.95),
+    glance1     = map(model1,     glance),
+    tidied1.1   = map(model1.1,   tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied1.2   = map(model1.2,   tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied2     = map(model2,     tidy, conf.int = TRUE, conf.level = 0.95),
+    glance2     = map(model2,     glance),
+    tidied2.1   = map(model2.1,   tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied2.2   = map(model2.2,   tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied2.3   = map(model2.3,   tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied2.3.1 = map(model2.3.1, tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied3     = map(model3,     tidy, conf.int = TRUE, conf.level = 0.95),
+    glance3     = map(model3,     glance),
+    tidied3.1   = map(model3.1,   tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied3.2   = map(model3.2,   tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied3.3   = map(model3.3,   tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied3.3.1 = map(model3.3.1, tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied4     = map(model4,     tidy, conf.int = TRUE, conf.level = 0.95),
+    glance4     = map(model4,     glance),
+    tidied4.1   = map(model4.1,   tidy, conf.int = TRUE, conf.level = 0.95),
+    glance4.1   = map(model4.1,   glance),
+    tidied4.2   = map(model4.2,   tidy, conf.int = TRUE, conf.level = 0.95),
+    glance4.2   = map(model4.2,   glance),
+    tidied5     = map(model5,     tidy, conf.int = TRUE, conf.level = 0.95),
+    glance5     = map(model5,     glance),
+    tidied5.1   = map(model5.1,   tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied5.2   = map(model5.2,   tidy, conf.int = TRUE, conf.level = 0.95),
+    glance6     = map(model6,     glance),
+    tidied6     = map(model6,     tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied6.1   = map(model6.1,   tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied6.2   = map(model6.2,   tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied6.3   = map(model6.3,   tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied6.3.1 = map(model6.3.1, tidy, conf.int = TRUE, conf.level = 0.95),
+    glance7     = map(model7,     glance),
+    tidied7     = map(model7,     tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied7.0   = map(model7.0,   tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied7.1   = map(model7.1,   tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied7.2   = map(model7.2,   tidy, conf.int = TRUE, conf.level = 0.95),
+    glance8     = map(model8,     glance),
+    tidied8     = map(model8,     tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied8.1   = map(model8.1,   tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied8.1.1 = map(model8.1.1, tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied8.2   = map(model8.2,   tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied8.3   = map(model8.3,   tidy, conf.int = TRUE, conf.level = 0.95),
+    tidied8.3.1 = map(model8.3.1, tidy, conf.int = TRUE, conf.level = 0.95)
+  ) %>%
+  select(-data)
+```
+
+
+# Post-hoc tests
+
+## Marital: Welch's t-test (unequal variance)
+```{r posthoc_marital}
+# Note: t.test reference group is OPPOSITE to lm() — group 2 (Unmarried) is reference
+t.test(data = mod9_data, soil_ts ~ marital.2g, var.equal = FALSE)
+```
+
+## Education: Games-Howell post-hoc test (unequal variance, 3 groups)
+```{r posthoc_education}
+games_howell_test(data = mod9_data, soil_ts ~ moca_edu.3g, conf.level = 0.95)
+```
+
+
+# Age–Loneliness scatterplot with marginal histograms
+```{r scatter_marginal}
+# Loess fit (panel a)
+p.loess <- mod9_data %>%
+  ggplot(aes(x = age_yrs, y = soil_ts)) +
+  geom_point() +
+  geom_smooth(method = "loess") +
+  labs(x = "Age (years)", y = "Loneliness") +
+  ggtitle("(a)")
+
+p.loess.marginal <- ggMarginal(p.loess,
+                               type    = "histogram",
+                               xparams = list(fill = "white", col = "skyblue4"),
+                               yparams = list(fill = "white", col = "springgreen4"))
+
+# Linear fit (panel b)
+p.lm <- mod9_data %>%
+  ggplot(aes(x = age_yrs, y = soil_ts)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(x = "Age (years)") +
+  theme(axis.title.y = element_blank()) +
+  ggtitle("(b)")
+
+p.lm.marginal <- ggMarginal(p.lm,
+                             type    = "histogram",
+                             xparams = list(fill = "white", col = "skyblue4"),
+                             yparams = list(fill = "white", col = "springgreen4"))
+
+# Combine and save
+p.marginal.combine <- arrangeGrob(p.loess.marginal, p.lm.marginal, ncol = 2)
+ggsave(output_scatter_file, p.marginal.combine, dpi = 300)
+```

@@ -1,0 +1,399 @@
+---
+title: "fMRI Preprocessing: Compile Nodal Stats and Prepare PALM Inputs"
+output: html_notebook
+---
+
+<!--
+Purpose:      Compile per-subject nodal graph metrics (absolute-edge variant) into
+              merged CSV files, then prepare nodal data files and design matrices
+              for PALM permutation testing (Model 9: N = 512; Model 9.4: N = 390).
+
+Inputs:
+  - datainfo.csv                   Output of behav_preproc_recode_variables.Rmd;
+                                   contains demographic, behavioral, and motion
+                                   QC variables (soil_ts, TripleOut_FD05_60Fr,
+                                   RS.fMRI_Count, rfMRIxxx_FD_average, moca_total,
+                                   sex, site, household.2g, marital.2g, age_yrs)
+  - subject_list_file.csv          Subject completion list
+  - abs_dir/                       Network graph output directory
+  - tgmv_file.csv                  Total gray matter volume
+  - net_summary_abs_file           Merged network summary stat CSV; must contain
+                                   src_subject_id, modularity_CAnet,
+                                   average_shortest_path_length
+
+Outputs — Model 9 (N = 512), written to abs_palm_dir/:
+  Nodal PALM inputs (no header, no ID):
+    abs_nodal_{metric}_n512.csv
+  Global PALM inputs (no header, no ID):
+    abs_global_modularity_n512.csv
+    abs_global_average_shortest_path_n512.csv
+  Design matrix:       abs_design_matrix_n512.csv
+  Site block:          abs_site_block_n512.csv
+  Verification files:  verify_abs_nodal_{metric}_n512.csv  (with subject ID)
+
+Outputs — Model 9.4 (N = 390), written to abs_palm94_dir/:
+  Same naming pattern with n390 suffix.
+
+Dependencies: tidyverse
+
+Usage:        Update all paths in USER CONFIGURATION block. Run the "Compile
+              nodal stats" chunk before the PALM input chunks, or ensure the
+              in-memory DataFrames (df_strength_abs, etc.) are available.
+
+Notes:
+  - Model 9 design matrix columns (12): soil_ts, age_yrs, soilxage, sex_num,
+    totalGray, rfMRI_FD_average, moca_total, site_MGH, site_UCLA, site_UMinn,
+    site_WashU, intercept
+  - Model 9.4 design matrix columns (14): soil_ts, age_yrs, soilxage,
+    sex.numeric, household.numeric, marital.numeric, totalGray,
+    rfMRI_FD_average, moca_total, site_MGH, site_UCLA, site_UMinn,
+    site_WashU, intercept
+  - Sex: Female = -1, Male = 1
+  - Household: 1-person = 1, 2+person = -1
+  - Marital: Not Married = 1, Married = -1
+  - Site blocks: MGH = 1, UCLA = 2, UMinn = 3, WashU = 4
+-->
+
+
+# Libraries
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+```
+
+
+# USER CONFIGURATION
+```{r config}
+# ---- Input files ----
+# Output of behav_preproc_recode_variables.Rmd
+datainfo_file        <- "/path/to/output/datainfo.csv"
+
+# Subject completion list; must have src_subject_id and Pos_only_graph
+subject_list_file    <- "/path/to/subject_list.csv"
+
+# Total gray matter volume CSV; must have src_subject_id and totalGray
+tgmv_file            <- "/path/to/TotalGray.csv"
+
+# Merged network summary stat CSV (absolute-edge variant)
+net_summary_abs_file <- "/path/to/merge_abs_network_summary_stat.csv"
+
+# ---- Network graph directory ----
+# Must contain per-subject subdirectories with {subject}_nodal_stats.csv
+abs_dir <- "/path/to/network_graph_absolute"
+
+# ---- PALM working directories ----
+# Model 9 (N = 512): must match palm_dir in run_fmri_stats_palm.slurm
+abs_palm_dir   <- "/path/to/palm_models/abs_model9"
+
+# Model 9.4 (N = 390)
+abs_palm94_dir <- "/path/to/palm_models/abs_model9_4"
+```
+
+
+# Load data
+```{r load_data}
+datainfo <- read.csv(datainfo_file, header = TRUE)
+
+# Subject completion list; filter to subjects with positive-only graph analysis
+temp_graph <- read.csv(subject_list_file, header = TRUE)
+# Fix BOM encoding artifact in first column name if present
+colnames(temp_graph)[1] <- "src_subject_id"
+
+graphdata <- temp_graph %>%
+  filter(Pos_only_graph == 1)
+
+# Merge behavioral and demographic variables from datainfo
+graphdata <- merge(
+  graphdata,
+  datainfo[, c("src_subject_id", "age_yrs", "age.bins.3", "sex",
+               "household.2g", "marital.2g", "work.2g", "annual_fam_inc.log",
+               "moca_edu.3g", "soil_ts", "soil.3g",
+               "TripleOut_FD05_60Fr", "RS.fMRI_Count",
+               "rfMRI1AP_FD_average", "rfMRI1PA_FD_average",
+               "rfMRI2AP_FD_average", "rfMRI2PA_FD_average",
+               "moca_total", "site")],
+  by = "src_subject_id",
+  all.x = TRUE
+)
+
+# Base sample: has loneliness score, passed motion QC, completed all 4 RS-fMRI runs
+finaldata <- graphdata %>%
+  filter(!is.na(soil_ts), TripleOut_FD05_60Fr == 1, RS.fMRI_Count == 4)
+
+dim(finaldata)
+```
+
+
+# Compile nodal stats — Abs
+```{r compile_nodal_abs}
+# Compile per-subject nodal stats into merged DataFrames.
+# Written to abs_dir/ for reference (with subject ID); PALM-ready files are
+# written later in the Model 9 / Model 9.4 sections.
+
+df_strength_abs     <- data.frame()
+df_normstrength_abs <- data.frame()
+df_closecent_abs    <- data.frame()
+df_betweencent_abs  <- data.frame()
+df_eigencent_abs    <- data.frame()
+df_pgcent_abs       <- data.frame()
+df_clustercoef_abs  <- data.frame()
+df_partcoef_abs     <- data.frame()
+
+for (ii in 1:nrow(finaldata)) {
+  subject <- finaldata$src_subject_id[ii]
+  nodal_f <- file.path(abs_dir, subject, paste0(subject, "_nodal_stats.csv"))
+  read_f  <- read.csv(nodal_f, header = TRUE)
+
+  df_strength_abs[ii, 1]     <- subject
+  df_normstrength_abs[ii, 1] <- subject
+  df_closecent_abs[ii, 1]    <- subject
+  df_betweencent_abs[ii, 1]  <- subject
+  df_eigencent_abs[ii, 1]    <- subject
+  df_pgcent_abs[ii, 1]       <- subject
+  df_clustercoef_abs[ii, 1]  <- subject
+  df_partcoef_abs[ii, 1]     <- subject
+
+  colnames(df_strength_abs)[1]     <- "src_subject_id"
+  colnames(df_normstrength_abs)[1] <- "src_subject_id"
+  colnames(df_closecent_abs)[1]    <- "src_subject_id"
+  colnames(df_betweencent_abs)[1]  <- "src_subject_id"
+  colnames(df_eigencent_abs)[1]    <- "src_subject_id"
+  colnames(df_pgcent_abs)[1]       <- "src_subject_id"
+  colnames(df_clustercoef_abs)[1]  <- "src_subject_id"
+  colnames(df_partcoef_abs)[1]     <- "src_subject_id"
+
+  for (cc in seq_along(read_f$strenth))                 { df_strength_abs[ii,     cc + 1] <- read_f$strenth[cc] }
+  for (cc in seq_along(read_f$normstrength))            { df_normstrength_abs[ii, cc + 1] <- read_f$normstrength[cc] }
+  for (cc in seq_along(read_f$closecent))               { df_closecent_abs[ii,    cc + 1] <- read_f$closecent[cc] }
+  for (cc in seq_along(read_f$betweencent))             { df_betweencent_abs[ii,  cc + 1] <- read_f$betweencent[cc] }
+  for (cc in seq_along(read_f$eigencent))               { df_eigencent_abs[ii,    cc + 1] <- read_f$eigencent[cc] }
+  for (cc in seq_along(read_f$pgcent))                  { df_pgcent_abs[ii,       cc + 1] <- read_f$pgcent[cc] }
+  for (cc in seq_along(read_f$clustercoef))             { df_clustercoef_abs[ii,  cc + 1] <- read_f$clustercoef[cc] }
+  for (cc in seq_along(read_f$participationcoef_CAnet)) { df_partcoef_abs[ii,     cc + 1] <- read_f$participationcoef_CAnet[cc] }
+}
+
+dim(df_normstrength_abs)
+dim(df_partcoef_abs)
+```
+
+
+# Load network summary stats
+```{r load_net_summary}
+df_net_abs <- read.csv(net_summary_abs_file, header = TRUE)
+```
+
+
+# Prepare confound variables
+```{r confounds}
+# Total gray matter volume
+tgmv_data <- read.csv(tgmv_file, header = TRUE)
+finaldata  <- merge(finaldata, tgmv_data, by = "src_subject_id", all.x = TRUE)
+summary(finaldata$totalGray)
+
+# Average mean FD across 4 runs
+finaldata <- finaldata %>%
+  rowwise() %>%
+  mutate(rfMRI_FD_average = mean(
+    c(rfMRI1AP_FD_average, rfMRI1PA_FD_average,
+      rfMRI2AP_FD_average, rfMRI2PA_FD_average),
+    na.rm = TRUE
+  )) %>%
+  ungroup()
+
+# Sex: numeric coding Female = -1, Male = 1
+finaldata <- finaldata %>%
+  mutate(sex_num = case_when(sex == "F" ~ -1,
+                             sex == "M" ~  1))
+
+# Household: 1-person = 1, 2+person = -1
+finaldata <- finaldata %>%
+  mutate(household.numeric = case_when(household.2g == "1-person" ~  1,
+                                       household.2g == "2+person" ~ -1))
+
+# Marital: Not Married = 1, Married = -1
+finaldata <- finaldata %>%
+  mutate(marital.numeric = case_when(marital.2g == "Not Married" ~  1,
+                                     marital.2g == "Married"     ~ -1))
+
+# Site dummy coding
+table(finaldata$site)
+finaldata <- finaldata %>%
+  mutate(site_MGH   = ifelse(site == "MGH",   1, 0),
+         site_UCLA  = ifelse(site == "UCLA",  1, 0),
+         site_UMinn = ifelse(site == "UMinn", 1, 0),
+         site_WashU = ifelse(site == "WashU", 1, 0))
+
+# Site block for PALM exchangeability: MGH=1, UCLA=2, UMinn=3, WashU=4
+finaldata <- finaldata %>%
+  mutate(site_block = case_when(site == "MGH"   ~ 1,
+                                site == "UCLA"  ~ 2,
+                                site == "UMinn" ~ 3,
+                                site == "WashU" ~ 4))
+
+# Intercept column
+finaldata$intercept <- 1
+```
+
+
+# Model 9 (N = 512)
+
+## Define sample
+```{r mod9_sample}
+# N = 512: finaldata excluding one subject removed per data quality review
+mod9_data <- finaldata %>%
+  filter(src_subject_id != "HCA7083065")
+
+# Re-center soil_ts and age_yrs within the N = 512 sample for interaction term
+mod9_data$age_yrs.c <- scale(mod9_data$age_yrs, center = TRUE, scale = FALSE)
+mod9_data$soil_ts.c <- scale(mod9_data$soil_ts, center = TRUE, scale = FALSE)
+mod9_data <- mod9_data %>%
+  mutate(soilxage = soil_ts.c * age_yrs.c)
+
+mod9_subjects <- mod9_data %>% select(src_subject_id)
+n9 <- nrow(mod9_data)   # 512
+dim(mod9_data)
+```
+
+## Nodal PALM files
+```{r mod9_nodal}
+# Output names match fmri_stats_palm.m expectations:
+#   abs_nodal_{metric}_n{N}.csv  (no header, no ID)
+# Verification files (with subject ID) written with verify_ prefix.
+
+nodal_dfs_abs <- list(
+  strength     = df_strength_abs,
+  normstrength = df_normstrength_abs,
+  closecent    = df_closecent_abs,
+  betweencent  = df_betweencent_abs,
+  eigencent    = df_eigencent_abs,
+  pgcent       = df_pgcent_abs,
+  clustercoef  = df_clustercoef_abs,
+  partcoef     = df_partcoef_abs
+)
+
+for (metric in names(nodal_dfs_abs)) {
+  temp_sub <- merge(mod9_subjects, nodal_dfs_abs[[metric]],
+                    by = "src_subject_id", all.x = TRUE)
+  out_name <- paste0("abs_nodal_", metric, "_n", n9, ".csv")
+
+  # PALM input: no header, no row names, no ID column
+  write.table(temp_sub[, 2:ncol(temp_sub)],
+              file.path(abs_palm_dir, out_name),
+              row.names = FALSE, col.names = FALSE, sep = ",")
+  # Verification file with subject ID
+  write.csv(temp_sub,
+            file.path(abs_palm_dir, paste0("verify_", out_name)),
+            row.names = FALSE)
+}
+```
+
+## Global PALM files (modularity and average shortest path)
+```{r mod9_global}
+df_mod <- merge(mod9_subjects,
+                df_net_abs[, c("src_subject_id", "modularity_CAnet")],
+                by = "src_subject_id", all.x = TRUE)
+df_mod %>%
+  select(modularity_CAnet) %>%
+  write.table(., file.path(abs_palm_dir, paste0("abs_global_modularity_n", n9, ".csv")),
+              row.names = FALSE, col.names = FALSE, sep = ",")
+
+df_path <- merge(mod9_subjects,
+                 df_net_abs[, c("src_subject_id", "average_shortest_path_length")],
+                 by = "src_subject_id", all.x = TRUE)
+df_path %>%
+  select(average_shortest_path_length) %>%
+  write.table(., file.path(abs_palm_dir, paste0("abs_global_average_shortest_path_n", n9, ".csv")),
+              row.names = FALSE, col.names = FALSE, sep = ",")
+```
+
+## Design matrix and site block
+```{r mod9_design}
+# Design matrix columns (12):
+# soil_ts, age_yrs, soilxage, sex_num, totalGray, rfMRI_FD_average,
+# moca_total, site_MGH, site_UCLA, site_UMinn, site_WashU, intercept
+mod9_data %>%
+  select(soil_ts, age_yrs, soilxage, sex_num, totalGray,
+         rfMRI_FD_average, moca_total,
+         site_MGH, site_UCLA, site_UMinn, site_WashU,
+         intercept) %>%
+  write.table(., file.path(abs_palm_dir, paste0("abs_design_matrix_n", n9, ".csv")),
+              row.names = FALSE, col.names = FALSE, sep = ",")
+
+mod9_data %>%
+  select(site_block) %>%
+  write.table(., file.path(abs_palm_dir, paste0("abs_site_block_n", n9, ".csv")),
+              row.names = FALSE, col.names = FALSE, sep = ",")
+```
+
+
+# Model 9.4 (N = 390)
+
+## Define sample
+```{r mod94_sample}
+# N = 390: adds non-missing sex, household.2g, and marital.2g filters
+mod94_data <- finaldata %>%
+  filter(!is.na(sex), !is.na(household.2g), !is.na(marital.2g),
+         src_subject_id != "HCA7083065")
+
+# Re-center soil_ts and age_yrs within the N = 390 sample for interaction term
+mod94_data$age_yrs.c <- scale(mod94_data$age_yrs, center = TRUE, scale = FALSE)
+mod94_data$soil_ts.c <- scale(mod94_data$soil_ts, center = TRUE, scale = FALSE)
+mod94_data <- mod94_data %>%
+  mutate(soilxage = soil_ts.c * age_yrs.c)
+
+mod94_subjects <- mod94_data %>% select(src_subject_id)
+n94 <- nrow(mod94_data)   # 390
+dim(mod94_data)
+```
+
+## Nodal PALM files
+```{r mod94_nodal}
+for (metric in names(nodal_dfs_abs)) {
+  temp_sub <- merge(mod94_subjects, nodal_dfs_abs[[metric]],
+                    by = "src_subject_id", all.x = TRUE)
+  out_name <- paste0("abs_nodal_", metric, "_n", n94, ".csv")
+
+  write.table(temp_sub[, 2:ncol(temp_sub)],
+              file.path(abs_palm94_dir, out_name),
+              row.names = FALSE, col.names = FALSE, sep = ",")
+}
+```
+
+## Global PALM files (modularity and average shortest path)
+```{r mod94_global}
+df_mod <- merge(mod94_subjects,
+                df_net_abs[, c("src_subject_id", "modularity_CAnet")],
+                by = "src_subject_id", all.x = TRUE)
+df_mod %>%
+  select(modularity_CAnet) %>%
+  write.table(., file.path(abs_palm94_dir, paste0("abs_global_modularity_n", n94, ".csv")),
+              row.names = FALSE, col.names = FALSE, sep = ",")
+
+df_path <- merge(mod94_subjects,
+                 df_net_abs[, c("src_subject_id", "average_shortest_path_length")],
+                 by = "src_subject_id", all.x = TRUE)
+df_path %>%
+  select(average_shortest_path_length) %>%
+  write.table(., file.path(abs_palm94_dir, paste0("abs_global_average_shortest_path_n", n94, ".csv")),
+              row.names = FALSE, col.names = FALSE, sep = ",")
+```
+
+## Design matrix and site block
+```{r mod94_design}
+# Design matrix columns (14):
+# soil_ts, age_yrs, soilxage, sex.numeric, household.numeric, marital.numeric,
+# totalGray, rfMRI_FD_average, moca_total, site_MGH, site_UCLA, site_UMinn,
+# site_WashU, intercept
+mod94_data %>%
+  select(soil_ts, age_yrs, soilxage,
+         sex.numeric, household.numeric, marital.numeric,
+         totalGray, rfMRI_FD_average, moca_total,
+         site_MGH, site_UCLA, site_UMinn, site_WashU,
+         intercept) %>%
+  write.table(., file.path(abs_palm94_dir, paste0("abs_design_matrix_n", n94, ".csv")),
+              row.names = FALSE, col.names = FALSE, sep = ",")
+
+mod94_data %>%
+  select(site_block) %>%
+  write.table(., file.path(abs_palm94_dir, paste0("abs_site_block_n", n94, ".csv")),
+              row.names = FALSE, col.names = FALSE, sep = ",")
+```

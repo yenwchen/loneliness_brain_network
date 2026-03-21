@@ -1,0 +1,23 @@
+# --- AI Tooling (Keeping GitHub clean) ---
+CLAUDE.md
+.claude/
+
+# --- Data & Results (Safety Shield) ---
+data/
+raw_data/
+results/
+figures/
+*.csv
+*.rds
+*.RData
+*.nii.gz
+
+# --- Development Junk ---
+__pycache__/
+.DS_Store
+.ipynb_checkpoints/
+.env/
+venv/
+
+# --- Local archive (uncleaned scripts), do not push ---
+scripts/osfstorage_archive/
