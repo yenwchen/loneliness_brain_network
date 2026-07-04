@@ -2,7 +2,7 @@
 
 **Author:** Yen-Wen Chen
 
-**Preprint:** https://doi.org/10.64898/2026.02.03.703621 | Under review at *Oxford Open Neuroscience*
+**Preprint:** https://doi.org/10.64898/2026.02.03.703621 | Accepted at *Oxford Open Neuroscience*
 
 
 ## Overview
